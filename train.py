@@ -117,45 +117,44 @@ def main(args):
         layers = [model_info['layers'][model_info['scales'].index(scale)] for scale in args.scales]
 
         for sub_category in sub_categories:
-            with mlflow.start_run(run_name=f"{sub_category}", nested=True):
-                logger_handler_id = logger.add(os.path.join(args.log_path, sub_category, 'runtime.log'), mode='w')
-                seed_worker       = fix_seeds(66)
-                model             = create_model(args.pretrained_model, layers).cuda().train()
-                dataset           = CPRDataset(args.dataset_name, sub_category, args.resize, args.data_dir, args.scales, args.region_sizes, args.retrieval_dir, args.foreground_dir)
-                writer            = SummaryWriter(os.path.join(args.log_path, sub_category), flush_secs=10)
-                dataloader        = DataLoader(dataset, batch_size=args.batch_size, sampler=InfiniteSampler(dataset), num_workers=args.num_workers, pin_memory=True, worker_init_fn=seed_worker)
-                optimizer         = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-2)
-                loss_fn           = ContrastiveLoss(exponent=3).cuda()
-                dataloader_iter   = iter(dataloader)
+            logger_handler_id = logger.add(os.path.join(args.log_path, sub_category, 'runtime.log'), mode='w')
+            seed_worker       = fix_seeds(66)
+            model             = create_model(args.pretrained_model, layers).cuda().train()
+            dataset           = CPRDataset(args.dataset_name, sub_category, args.resize, args.data_dir, args.scales, args.region_sizes, args.retrieval_dir, args.foreground_dir)
+            writer            = SummaryWriter(os.path.join(args.log_path, sub_category), flush_secs=10)
+            dataloader        = DataLoader(dataset, batch_size=args.batch_size, sampler=InfiniteSampler(dataset), num_workers=args.num_workers, pin_memory=True, worker_init_fn=seed_worker)
+            optimizer         = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-2)
+            loss_fn           = ContrastiveLoss(exponent=3).cuda()
+            dataloader_iter   = iter(dataloader)
 
-                mlflow.log_param(f"{sub_category}/learning_rate", args.learning_rate)
-                mlflow.log_param(f"{sub_category}/batch_size", args.batch_size)
+            mlflow.log_param(f"{sub_category}/learning_rate", args.learning_rate)
+            mlflow.log_param(f"{sub_category}/batch_size", args.batch_size)
 
-            
-                for global_step in trange(1, args.steps+1, leave=False, desc=f'{sub_category} train'):
-                    batch  = [x.cuda() for x in next(dataloader_iter)]
-                    loss_d = train_one_step(model, batch, loss_fn)
-                    optimizer.zero_grad()
-                    loss_d['loss'].backward()
-                    optimizer.step()
-                    [writer.add_scalar(f"train/{k}", v.item(), global_step) for k, v in loss_d.items()]
+        
+            for global_step in trange(1, args.steps+1, leave=False, desc=f'{sub_category} train'):
+                batch  = [x.cuda() for x in next(dataloader_iter)]
+                loss_d = train_one_step(model, batch, loss_fn)
+                optimizer.zero_grad()
+                loss_d['loss'].backward()
+                optimizer.step()
+                [writer.add_scalar(f"train/{k}", v.item(), global_step) for k, v in loss_d.items()]
 
-                    mlflow.log_metric(f"{sub_category}/train/loss", loss_d['loss'].item(), step=global_step)
-                    mlflow.log_metric(f"{sub_category}/train/pos_loss", loss_d['pos_loss'].item(), step=global_step)
-                    mlflow.log_metric(f"{sub_category}/train/neg_loss", loss_d['neg_loss'].item(), step=global_step)
+                mlflow.log_metric(f"{sub_category}/train/loss", loss_d['loss'].item(), step=global_step)
+                mlflow.log_metric(f"{sub_category}/train/pos_loss", loss_d['pos_loss'].item(), step=global_step)
+                mlflow.log_metric(f"{sub_category}/train/neg_loss", loss_d['neg_loss'].item(), step=global_step)
 
-                    if global_step % args.test_per_steps == 0 or global_step == args.steps: 
-                        vis_dir = os.path.join(args.log_path, sub_category, 'heatmaps')
-                        ret = test(model, dataset.train_fns, dataset.test_fns, dataset.retrieval_result, dataset.foreground_result, args.resize, args.region_sizes, dataset.root_dir, args.k_nearest, args.T, vis_dir)
-                        torch.save(model.state_dict(), os.path.join(args.log_path, sub_category, f'{global_step:05d}.pth'))
+                if global_step % args.test_per_steps == 0 or global_step == args.steps: 
+                    vis_dir = os.path.join(args.log_path, sub_category, 'heatmaps')
+                    ret = test(model, dataset.train_fns, dataset.test_fns, dataset.retrieval_result, dataset.foreground_result, args.resize, args.region_sizes, dataset.root_dir, args.k_nearest, args.T, vis_dir)
+                    torch.save(model.state_dict(), os.path.join(args.log_path, sub_category, f'{global_step:05d}.pth'))
 
-                        mlflow.log_artifact(os.path.join(args.log_path, sub_category, f'{global_step:05d}.pth'), "models")
-                        for k, v in ret.items():
-                            mlflow.log_metric(f"test/{k}", v, step=global_step)
+                    mlflow.log_artifact(os.path.join(args.log_path, sub_category, f'{global_step:05d}.pth'), "models")
+                    for k, v in ret.items():
+                        mlflow.log_metric(f"{sub_category}/train/{k}", v, step=global_step)
 
-                        logger.info(f'[{global_step}] {sub_category} test result: {" ".join([f"{k}: {v:.4f}" for k, v in ret.items()])}')
-                        [writer.add_scalar(f"test/{k}", v, global_step) for k, v in ret.items()]
-                        model.train()
+                    logger.info(f'[{global_step}] {sub_category} test result: {" ".join([f"{k}: {v:.4f}" for k, v in ret.items()])}')
+                    [writer.add_scalar(f"{sub_category}/train/{k}", v, global_step) for k, v in ret.items()]
+                    model.train()
             logger.remove(logger_handler_id)
 
 if __name__ == "__main__":

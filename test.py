@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dataset import DATASET_INFOS, read_image, read_mask, test_transform
-from metrics import compute_ap_torch, compute_pixel_auc_torch, compute_pro_torch, compute_image_auc_torch
+from metrics import compute_ap_torch, compute_pixel_auc_torch, compute_pro_torch, compute_image_auc_torch, compute_F1
 from models import create_model, MODEL_INFOS, CPR
 from utils import fix_seeds
 
@@ -38,10 +38,11 @@ def get_args_parser():
     parser.add_argument("-rs", "--region-sizes", type=int, nargs="+", help="local retrieval region size", default=[3, 1])
     parser.add_argument("-pm", "--pretrained-model", type=str, default='DenseNet', choices=list(MODEL_INFOS.keys()), help="pretrained model")
     parser.add_argument("--checkpoints", type=str, nargs="+", default=None, help="checkpoints")
+    # parser.add_argument("--use-groundtruth", action="store_true", default=True, help="whether to use groundtruth for pixel-level metrics")
     return parser
 
 @torch.no_grad()
-def test(model: CPR, train_fns, test_fns, retrieval_result, foreground_result, resize, region_sizes, root_dir, knn, T, vis_dir=None):
+def test(model: CPR, train_fns, test_fns, retrieval_result, foreground_result, resize, region_sizes, root_dir, knn, T, vis_dir=None, use_groundtruth=True):
     model.eval()
     train_local_features = [torch.zeros((len(train_fns), out_channels, *shape[2:]), device='cuda') for shape, out_channels in zip(model.backbone.shapes, model.lrb.out_channels_list)]
     train_foreground_weights = []
@@ -75,7 +76,7 @@ def test(model: CPR, train_fns, test_fns, retrieval_result, foreground_result, r
             mask = np.zeros((resize, resize))
         
         gts.append((mask > 127).astype(int))
-        i_gts.append((mask > 127).sum() > 0 and 1 or 0)
+        i_gts.append(0 if 'good' in k else 1)
         
         features_list, ori_features_list = model(image_t[None].cuda())
         features_list = [features / (torch.norm(features, p=2, dim=1, keepdim=True) + 1e-8) for features in features_list]
@@ -109,13 +110,15 @@ def test(model: CPR, train_fns, test_fns, retrieval_result, foreground_result, r
             score = score * foreground_weight
         score_g = gaussian_blur(score[None], (33, 33), 4)[0]  # PatchCore
 
+
+
         if vis_dir is not None:
-            anomaly_name = os.path.dirname(k).split('/')[-1]  
+            anomaly_name = os.path.dirname(k).split('/')[-1]
             image_name = os.path.basename(k)[:-4]  
-            mask_fn = os.path.join(root_dir, 'ground_truth', anomaly_name, f'{image_name}_mask.png') if anomaly_name != 'good' else None
+            mask_fn = os.path.join(root_dir, 'ground_truth', anomaly_name, f'{image_name}_mask.png') # if anomaly_name != 'good' else None
             
-            defect = image  
-            mask_gt = read_mask(mask_fn, (resize, resize)) if mask_fn is not None else np.zeros((resize, resize), dtype=np.uint8)
+            defect = image
+            mask_gt = read_mask(mask_fn, (resize, resize)) if os.path.exists(mask_fn) else np.zeros((resize, resize), dtype=np.uint8)
             
             heatmap = score_g.cpu().numpy()
             min_score = np.min(heatmap)
@@ -140,42 +143,48 @@ def test(model: CPR, train_fns, test_fns, retrieval_result, foreground_result, r
         preds['i'].append(det_score)
         preds['p'].append(score_g)
     gts = torch.from_numpy(np.stack(gts)).cuda()
+    best_threshold, best_f1 = compute_F1(torch.stack(preds['i']), torch.tensor(i_gts).long().cuda())
     return {
         'pro': compute_pro_torch(gts, torch.stack(preds['p'])),
         'ap': compute_ap_torch(gts, torch.stack(preds['p'])),
         'pixel-auc': compute_pixel_auc_torch(gts, torch.stack(preds['p'])),
         'image-auc': compute_image_auc_torch(torch.tensor(i_gts).long().cuda(), torch.stack(preds['i'])),
-    }
+        'image-f1': best_f1,
+        'f1-threshold': best_threshold
+        }
 
 def main(args):
-    all_categories, object_categories, texture_categories = DATASET_INFOS[args.dataset_name]
-    sub_categories = DATASET_INFOS[args.dataset_name][0] if args.sub_categories is None else args.sub_categories
-    assert all([sub_category in all_categories for sub_category in sub_categories]), f"{sub_categories} must all be in {all_categories}"
-    model_info = MODEL_INFOS[args.pretrained_model]
-    layers = [model_info['layers'][model_info['scales'].index(scale)] for scale in args.scales]
-    for sub_category_idx, sub_category in enumerate(sub_categories):
-        vis_dir = os.path.join(args.log_path, sub_category, 'heatmaps') if args.checkpoints else None
-        fix_seeds(66)
-        model             = create_model(args.pretrained_model, layers).cuda()
-        if args.checkpoints is not None:
-            checkpoint_fn = args.checkpoints[0] if len(args.checkpoints) == 1 else args.checkpoints[sub_category_idx]
-            if '{category}' in checkpoint_fn: checkpoint_fn = checkpoint_fn.format(category=sub_category)
-            model.load_state_dict(torch.load(checkpoint_fn), strict=False)
-        root_dir = os.path.join('./data', args.dataset_name, sub_category)
-        train_fns = sorted(glob(os.path.join(root_dir, 'train/*/*')))
-        test_fns = sorted(glob(os.path.join(root_dir, 'test/*/*')))
-        with open(os.path.join(args.retrieval_dir, sub_category, 'r_result.json'), 'r') as f:
-            retrieval_result = json.load(f)
-        foreground_result = {}
-        if args.foreground_dir is not None and sub_category in object_categories:
-            for fn in train_fns + test_fns:
-                k = os.path.relpath(fn, root_dir)
-                foreground_result[k] = os.path.join(args.foreground_dir, sub_category, os.path.dirname(k), 'f_' + os.path.splitext(os.path.basename(k))[0] + '.npy')
-        ret = test(model, train_fns, test_fns, retrieval_result, foreground_result, args.resize, args.region_sizes, root_dir, args.k_nearest, args.T, vis_dir)
-        print(f'================={sub_category}=================')
-        for k, v in ret.items():
-                mlflow.log_metric(f"{sub_category}/{k}", v)
-        print(ret)
+    mlflow.set_tracking_uri("./mlruns") 
+    mlflow.set_experiment(f"CPR_{args.dataset_name}")
+    with mlflow.start_run(run_name=f"test_{args.pretrained_model}_{args.resize}"):
+        all_categories, object_categories, texture_categories = DATASET_INFOS[args.dataset_name]
+        sub_categories = DATASET_INFOS[args.dataset_name][0] if args.sub_categories is None else args.sub_categories
+        assert all([sub_category in all_categories for sub_category in sub_categories]), f"{sub_categories} must all be in {all_categories}"
+        model_info = MODEL_INFOS[args.pretrained_model]
+        layers = [model_info['layers'][model_info['scales'].index(scale)] for scale in args.scales]
+        for sub_category_idx, sub_category in enumerate(sub_categories):
+            vis_dir = os.path.join(args.log_path, sub_category, 'heatmaps') if args.checkpoints else None
+            fix_seeds(66)
+            model             = create_model(args.pretrained_model, layers).cuda()
+            if args.checkpoints is not None:
+                checkpoint_fn = args.checkpoints[0] if len(args.checkpoints) == 1 else args.checkpoints[sub_category_idx]
+                if '{category}' in checkpoint_fn: checkpoint_fn = checkpoint_fn.format(category=sub_category)
+                model.load_state_dict(torch.load(checkpoint_fn), strict=False)
+            root_dir = os.path.join('./data', args.dataset_name, sub_category)
+            train_fns = sorted(glob(os.path.join(root_dir, 'train/*/*')))
+            test_fns = sorted(glob(os.path.join(root_dir, 'test/*/*')))
+            with open(os.path.join(args.retrieval_dir, sub_category, 'r_result.json'), 'r') as f:
+                retrieval_result = json.load(f)
+            foreground_result = {}
+            if args.foreground_dir is not None and sub_category in object_categories:
+                for fn in train_fns + test_fns:
+                    k = os.path.relpath(fn, root_dir)
+                    foreground_result[k] = os.path.join(args.foreground_dir, sub_category, os.path.dirname(k), 'f_' + os.path.splitext(os.path.basename(k))[0] + '.npy')
+            ret = test(model, train_fns, test_fns, retrieval_result, foreground_result, args.resize, args.region_sizes, root_dir, args.k_nearest, args.T, vis_dir)
+            print(f'================={sub_category}=================')
+            for k, v in ret.items():
+                    mlflow.log_metric(f"{sub_category}/test/{k}", v)
+            print(ret)
 
 if __name__ == "__main__":
     parser = get_args_parser()

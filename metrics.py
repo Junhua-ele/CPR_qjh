@@ -9,6 +9,7 @@ from torch import Tensor
 from torchmetrics.functional.classification import binary_roc  # 0.10.3
 import numpy as np
 import torch
+from torchmetrics.functional import precision_recall_curve
 import torchmetrics.functional as MF
 
 def pixel_params_verify(gts, preds):
@@ -353,3 +354,13 @@ def compute_pro_torch(gts, preds, integration_limit=0.3):
     aupro = MF.auc(fpr, tpr, reorder=True)
     aupro = aupro / fpr[-1]  # normalize the area
     return aupro.item()
+
+def compute_F1(preds, gts):
+    precision, recall, thresholds = precision_recall_curve(preds.flatten(), gts.flatten(), task='binary')
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+    
+    best_idx = torch.argmax(f1_scores)
+    best_threshold = thresholds[best_idx]
+    best_f1 = f1_scores[best_idx]
+    
+    return best_threshold, best_f1
