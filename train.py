@@ -35,6 +35,7 @@ def get_args_parser():
     parser.add_argument("-rd", "--retrieval-dir", type=str, default='log/retrieval_mvtec_DenseNet_features.denseblock1_320', help="retrieval dir")
     parser.add_argument("-dd", "--data-dir", type=str, default='log/synthetic_mvtec_640_12000_True_jpg/', help="synthetic data dir")
     parser.add_argument("--sub-categories", type=str, nargs="+", default=None, help="sub categories", choices=list(chain(*[x[0] for x in list(DATASET_INFOS.values())])))
+    parser.add_argument("--root_dir", type=str, default="./data", help="root dir of datasets")
     # train
     parser.add_argument("-bs", "--batch-size", type=int, default=32)
     parser.add_argument("-lr", "--learning-rate", type=float, default=1e-3)
@@ -109,7 +110,6 @@ def main(args):
         save_dependencies_files(os.path.join(args.log_path, 'src'))
         mlflow.log_artifacts(os.path.join(args.log_path, 'src'), "src")
 
-        save_dependencies_files(os.path.join(args.log_path, 'src'))
         all_categories = DATASET_INFOS[args.dataset_name][0]
         sub_categories = all_categories if args.sub_categories is None else args.sub_categories
         assert all([sub_category in all_categories for sub_category in sub_categories]), f"{sub_categories} must all be in {all_categories}"
@@ -120,17 +120,20 @@ def main(args):
             logger_handler_id = logger.add(os.path.join(args.log_path, sub_category, 'runtime.log'), mode='w')
             seed_worker       = fix_seeds(66)
             model             = create_model(args.pretrained_model, layers).cuda().train()
-            dataset           = CPRDataset(args.dataset_name, sub_category, args.resize, args.data_dir, args.scales, args.region_sizes, args.retrieval_dir, args.foreground_dir)
+            dataset           = CPRDataset(args.dataset_name, sub_category, args.resize, args.data_dir, 
+                                            args.scales, args.region_sizes, args.retrieval_dir, args.foreground_dir, root_dir=args.root_dir)
             writer            = SummaryWriter(os.path.join(args.log_path, sub_category), flush_secs=10)
             dataloader        = DataLoader(dataset, batch_size=args.batch_size, sampler=InfiniteSampler(dataset), num_workers=args.num_workers, pin_memory=True, worker_init_fn=seed_worker)
             optimizer         = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-2)
             loss_fn           = ContrastiveLoss(exponent=3).cuda()
             dataloader_iter   = iter(dataloader)
 
+            sub_best_score = -1
+            sub_best_model = None
+
             mlflow.log_param(f"{sub_category}/learning_rate", args.learning_rate)
             mlflow.log_param(f"{sub_category}/batch_size", args.batch_size)
 
-        
             for global_step in trange(1, args.steps+1, leave=False, desc=f'{sub_category} train'):
                 batch  = [x.cuda() for x in next(dataloader_iter)]
                 loss_d = train_one_step(model, batch, loss_fn)
@@ -146,9 +149,20 @@ def main(args):
                 if global_step % args.test_per_steps == 0 or global_step == args.steps: 
                     vis_dir = os.path.join(args.log_path, sub_category, 'heatmaps')
                     ret = test(model, dataset.train_fns, dataset.test_fns, dataset.retrieval_result, dataset.foreground_result, args.resize, args.region_sizes, dataset.root_dir, args.k_nearest, args.T, vis_dir)
-                    torch.save(model.state_dict(), os.path.join(args.log_path, sub_category, f'{global_step:05d}.pth'))
+                    
+                    # 修改后的模型保存逻辑
+                    current_score = ret['image-f1']
+                    if current_score > sub_best_score:
+                        sub_best_score = current_score
+                        sub_best_model = model.state_dict()
+                        torch.save(sub_best_model, os.path.join(args.log_path, sub_category, 'best.pth'))
+                        mlflow.log_artifact(os.path.join(args.log_path, sub_category, 'best.pth'), "models")
+                    
+                    # 仅在最终步骤保存最终模型
+                    if global_step == args.steps:
+                        torch.save(model.state_dict(), os.path.join(args.log_path, sub_category, 'final.pth')) 
+                        mlflow.log_artifact(os.path.join(args.log_path, sub_category, 'final.pth'), "models")
 
-                    mlflow.log_artifact(os.path.join(args.log_path, sub_category, f'{global_step:05d}.pth'), "models")
                     for k, v in ret.items():
                         mlflow.log_metric(f"{sub_category}/train/{k}", v, step=global_step)
 

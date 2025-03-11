@@ -18,7 +18,8 @@ from dataset.transforms import RandomSPNoise, RandomLightness
 
 
 class CPRDataset(Dataset):
-    def __init__(self, dataset_name: str, sub_category: str, resize: int, data_dir: str, scales: List[int], region_sizes: List[int], retrieval_dir: str, foreground_dir: str = None, nAnomaly: int = 0, knn: int = 10) -> None:
+    def __init__(self, dataset_name: str, sub_category: str, resize: int, data_dir: str, scales: List[int], region_sizes: List[int], retrieval_dir: str, 
+                foreground_dir: str = None, nAnomaly: int = 0, knn: int = 10, root_dir: str = './data') -> None:
         self.dataset_name             = dataset_name
         self.sub_category             = sub_category
         self.is_object                = sub_category in DATASET_INFOS[self.dataset_name][1]
@@ -38,8 +39,9 @@ class CPRDataset(Dataset):
         self.foreground_weights       = {}
         self.outlier_data_cache       = {}
         self._cache                   = {}
-        self.root_dir                 = os.path.join('./data', self.dataset_name, sub_category)
+        self.root_dir                 = os.path.join(root_dir, self.dataset_name, sub_category)
         self.foreground_result        = {}
+        self.origin_dir               = root_dir
 
         # load data
         with open(os.path.join(retrieval_dir, sub_category, 'r_result.json'), 'r') as f:
@@ -196,7 +198,7 @@ class CPRDataset(Dataset):
             image, mask = self.extended_anomaly(image, mask)
             
         retrieval_k = self.retrieval_result[k][random.randint(0, self.knn-1)]
-        retrieval_image_fn = os.path.join('./data', self.dataset_name, sub_category, retrieval_k)
+        retrieval_image_fn = os.path.join(self.origin_dir, self.dataset_name, sub_category, retrieval_k)
         retrieval_image = self.read_image(retrieval_image_fn, True)
 
         # aug
