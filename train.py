@@ -150,7 +150,7 @@ def main(args):
                     vis_dir = os.path.join(args.log_path, sub_category, 'heatmaps')
                     ret = test(model, dataset.train_fns, dataset.test_fns, dataset.retrieval_result, dataset.foreground_result, args.resize, args.region_sizes, dataset.root_dir, args.k_nearest, args.T, vis_dir)
                     
-                    # 修改后的模型保存逻辑
+                    # save the best model
                     current_score = ret['image-f1']
                     if current_score > sub_best_score:
                         sub_best_score = current_score
@@ -158,7 +158,7 @@ def main(args):
                         torch.save(sub_best_model, os.path.join(args.log_path, sub_category, 'best.pth'))
                         mlflow.log_artifact(os.path.join(args.log_path, sub_category, 'best.pth'), "models")
                     
-                    # 仅在最终步骤保存最终模型
+                    # save the last model
                     if global_step == args.steps:
                         torch.save(model.state_dict(), os.path.join(args.log_path, sub_category, 'final.pth')) 
                         mlflow.log_artifact(os.path.join(args.log_path, sub_category, 'final.pth'), "models")
